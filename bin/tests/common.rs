@@ -106,7 +106,7 @@ pub fn truncate_file(file_path: &PathBuf) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AgentSettings<'a> {
     pub log_dirs: &'a str,
     pub exclusion_regex: Option<&'a str>,
@@ -318,10 +318,22 @@ pub fn start_http_ingester() -> (
     impl FnOnce(),
     String,
 ) {
+    start_http_ingester_with_delay(0)
+}
+
+/// Starts the http ingester that introduces an artificial delay between request and response.
+pub fn start_http_ingester_with_delay(
+    delay_ms: u64,
+) -> (
+    impl Future<Output = std::result::Result<(), HyperError>>,
+    FileLineCounter,
+    impl FnOnce(),
+    String,
+) {
     let port = get_available_port().expect("No ports free");
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
 
-    let (server, received, shutdown_handle) = http_ingester(address);
+    let (server, received, shutdown_handle) = http_ingester(address, delay_ms);
     (
         server,
         received,

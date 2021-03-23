@@ -47,6 +47,7 @@ struct Line {
 #[derive(Debug)]
 pub struct Svc {
     files: FileLineCounter,
+    delay_ms: u64,
 }
 
 impl Unpin for Svc {}
@@ -64,6 +65,7 @@ impl Service<Request<Body>> for Svc {
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         info!("Received {:?}", req);
         let files = self.files.clone();
+        let delay = self.delay_ms;
         Box::pin(async move {
             let rsp = Response::builder();
 
@@ -115,6 +117,13 @@ impl Service<Request<Body>> for Svc {
                 }
             };
 
+            info!("Obtained {} lines", ingest_body.lines.len());
+
+            if delay > 0 {
+                tokio::time::delay_for(tokio::time::Duration::from_millis(delay)).await;
+                // std::thread::sleep(core::time::Duration::from_millis(delay));
+            }
+
             for line in ingest_body.lines {
                 if let Some(mut raw_line) = line.line {
                     if !raw_line.ends_with('\n') {
@@ -147,19 +156,21 @@ impl Service<Request<Body>> for Svc {
 
 pub struct MakeSvc {
     files: FileLineCounter,
+    delay_ms: u64,
 }
 
 impl MakeSvc {
-    pub fn new() -> Self {
+    pub fn new(delay_ms: u64) -> Self {
         MakeSvc {
             files: Arc::new(Mutex::new(HashMap::new())),
+            delay_ms,
         }
     }
 }
 
 impl Default for MakeSvc {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
@@ -175,19 +186,21 @@ impl<T> Service<T> for MakeSvc {
     fn call(&mut self, _: T) -> Self::Future {
         future::ok(Svc {
             files: self.files.clone(),
+            delay_ms: self.delay_ms,
         })
     }
 }
 
 pub fn http_ingester(
     addr: SocketAddr,
+    delay_ms: u64,
 ) -> (
     impl Future<Output = std::result::Result<(), HyperError>>,
     FileLineCounter,
     impl FnOnce(),
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let mk_svc = MakeSvc::new();
+    let mk_svc = MakeSvc::new(delay_ms);
     let received = mk_svc.files.clone();
     (
         async move {
@@ -229,7 +242,7 @@ pub fn https_ingester(
 ) {
     info!("creating https_ingester");
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let mk_svc = MakeSvc::new();
+    let mk_svc = MakeSvc::new(0);
     let received = mk_svc.files.clone();
     (
         async move {
