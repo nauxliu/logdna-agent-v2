@@ -8,8 +8,9 @@ edition = "2018"
 #local
 metrics = { package = "metrics", path = "../metrics" }
 state = { package = "state", path = "../state" }
+
 #http
-logdna-client = { git ="https://github.com/logdna/logdna-rust.git", branch="0.4.x-debug" }
+logdna-client = { git ="https://github.com/logdna/logdna-rust.git", branch="0.4.x" }
 
 #io
 tokio = "0.2"

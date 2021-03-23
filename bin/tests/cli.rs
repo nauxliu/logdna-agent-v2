@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::thread::{self, sleep};
 use std::time::Duration;
 use systemd::journal;
@@ -781,13 +781,22 @@ async fn test_tags() {
 #[tokio::test]
 #[cfg_attr(not(feature = "integration_tests"), ignore)]
 async fn test_lookback_restarting_agent() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let line_count = Arc::new(AtomicUsize::new(0));
+
     let dir = tempdir().expect("Couldn't create temp dir...").into_path();
     let db_dir = tempdir().unwrap().into_path();
-    let (server, received, shutdown_handle, addr) = common::start_http_ingester_with_delay(200);
+    let (server, received, shutdown_handle, addr) = common::start_http_ingester_with_delay(100);
 
     let mut settings = AgentSettings::with_mock_ingester(&dir.to_str().unwrap(), &addr);
     settings.state_db_dir = Some(&db_dir);
     settings.exclusion_regex = Some(r"/var\w*");
+
+    let line_count_target = 180_000;
+
+    let line_count_clone = line_count.clone();
 
     let (server_result, _) = tokio::join!(server, async {
         let file_path = dir.join("test.log");
@@ -796,40 +805,55 @@ async fn test_lookback_restarting_agent() {
             .create(true)
             .open(&file_path)
             .unwrap();
-        std::thread::spawn(move || {
-            for i in 0..1_000_000 {
+        let writer_thread = std::thread::spawn(move || {
+            for i in 0..line_count_target {
                 writeln!(file, "Hello from line {}", i).unwrap();
+                line_count_clone.fetch_add(1, Ordering::SeqCst);
                 if i % 1000 == 0 {
                     file.sync_all().unwrap();
                 }
 
-                if i % 5 == 0 {
-                    std::thread::sleep(core::time::Duration::from_millis(5));
+                if i % 20 == 0 {
+                    std::thread::sleep(core::time::Duration::from_millis(1));
                 }
             }
         });
 
+        eprintln!("Running first agent");
         let mut agent_handle = common::spawn_agent(settings.clone());
-        consume_output(&mut agent_handle);
-
-        // Wait for a while before killing the agent
+        let agent_stderr = agent_handle.stderr.take().unwrap();
+        consume_output(agent_stderr);
         tokio::time::delay_for(tokio::time::Duration::from_millis(1000)).await;
-        agent_handle.kill().expect("Could not kill process");
 
-        // Inserting more lines while the agent is down
-        tokio::time::delay_for(tokio::time::Duration::from_millis(2000)).await;
+        while line_count.load(Ordering::SeqCst) < line_count_target {
+            tokio::time::delay_for(tokio::time::Duration::from_millis(1000)).await;
+            agent_handle.kill().expect("Could not kill process");
+            // Restart it back again
+            eprintln!("Running next agent");
+            agent_handle = common::spawn_agent(settings.clone());
+            let agent_stderr = agent_handle.stderr.take().unwrap();
+            consume_output(agent_stderr);
+        }
 
-        // Restart it back again
-        let mut agent_handle = common::spawn_agent(settings.clone());
-        consume_output(&mut agent_handle);
+        // Block til writing is definitely done
+        task::spawn_blocking(move || writer_thread.join().unwrap())
+            .await
+            .unwrap();
 
-        tokio::time::delay_for(tokio::time::Duration::from_millis(2000)).await;
+        // Give the agent a chance to catch up
+        tokio::time::delay_for(tokio::time::Duration::from_millis(100000)).await;
 
         let map = received.lock().await;
         assert!(map.len() > 0);
         let file_info = map.get(file_path.to_str().unwrap()).unwrap();
 
         assert!(file_info.values.len() > 100);
+        eprintln!(
+            "{}, {}",
+            file_info.values.len(),
+            line_count.load(Ordering::SeqCst)
+        );
+        assert!(file_info.values.len() >= line_count.load(Ordering::SeqCst));
 
         for i in 0..file_info.values.len() {
             assert_eq!(file_info.values[i], format!("Hello from line {}\n", i));
@@ -842,8 +866,8 @@ async fn test_lookback_restarting_agent() {
     server_result.unwrap();
 }
 
-fn consume_output(agent_handle: &mut Child) {
-    let stderr_reader = std::io::BufReader::new(agent_handle.stderr.take().unwrap());
+fn consume_output(stderr_handle: std::process::ChildStderr) {
+    let stderr_reader = std::io::BufReader::new(stderr_handle);
     std::thread::spawn(move || {
         stderr_reader.lines().count();
     });
