@@ -12,6 +12,7 @@ use std::time::Duration;
 use systemd::journal;
 use tempfile::tempdir;
 use test_types::random_line_string_vec;
+use tokio::task;
 
 mod common;
 
@@ -799,13 +800,34 @@ fn lookback_stateful_lines_are_delivered() {
         .for_each(|_| writeln!(file, "{}", log_lines).expect("Couldn't write to temp log file..."));
     file.sync_all().expect("Failed to sync file");
 
+    debug!("file len pre agent: {}", file.metadata().unwrap().len());
+    let file_path_clone = file_path.clone();
+    let handler = thread::spawn(move || {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&file_path_clone)
+            .expect("Couldn't create temp log file...");
+
+        (0..20_000).enumerate().for_each(|(idx, _)| {
+            writeln!(&mut file, "{}", log_lines).expect("Couldn't write to temp log file...");
+            if idx % 10 == 0 {
+                sleep(std::time::Duration::from_millis(1));
+            }
+            if idx % 500 == 0 {
+                debug!("file len: {}, idx: {}", file.metadata().unwrap().len(), idx);
+                file.sync_all().expect("Failed to sync file");
+            }
+        });
+        debug!("file len at end: {}", file.metadata().unwrap().len());
+    });
+
     // Write initial lines
     debug!("First agent run");
     let (server, received, shutdown_handle, cert_file, addr) = common::self_signed_https_ingester();
     thread::sleep(std::time::Duration::from_millis(250));
     let file_path1 = file_path.clone();
     let file_path_clone = file_path.clone();
-    tokio_test::block_on(async {
+    let line_count1 = tokio_test::block_on(async {
         let (line_count, _, server) = tokio::join!(
             async {
                 tokio::time::delay_for(tokio::time::Duration::from_millis(200)).await;
@@ -820,7 +842,7 @@ fn lookback_stateful_lines_are_delivered() {
                 });
 
                 let stderr_reader = std::io::BufReader::new(handle.stderr.take().unwrap());
-                std::thread::spawn(move || {
+                let stderr_thread = std::thread::spawn(move || {
                     stderr_reader.lines().for_each(|line| debug!("{:?}", line))
                 });
 
@@ -837,7 +859,20 @@ fn lookback_stateful_lines_are_delivered() {
                     .lines;
                 shutdown_handle();
 
+                debug!(
+                    "Waiting for agent to finish up {}",
+                    &file_path1.to_str().unwrap()
+                );
                 handle.wait().unwrap();
+
+                debug!(
+                    "Waiting for stderr reader to finish up {}",
+                    &file_path1.to_str().unwrap()
+                );
+                task::spawn_blocking(move || stderr_thread.join().unwrap())
+                    .await
+                    .unwrap();
+
                 line_count
             },
             async move {
@@ -846,7 +881,7 @@ fn lookback_stateful_lines_are_delivered() {
                     .append(true)
                     .open(&file_path_clone)
                     .expect("Couldn't create temp log file...");
-                (0..5).for_each(|_| {
+                (0..5000).for_each(|_| {
                     writeln!(file, "{}", log_lines).expect("Couldn't write to temp log file...");
                     file.sync_all().expect("Failed to sync file");
                 });
@@ -856,8 +891,28 @@ fn lookback_stateful_lines_are_delivered() {
             server
         );
         server.unwrap();
-        assert_eq!(line_count, line_write_count + 5);
+        assert!(line_count > line_write_count + 5);
+        line_count
     });
+
+    // Write some lines in the middle
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&file_path)
+        .expect("Couldn't create temp log file...");
+
+    debug!(
+        "file len between agents: {}",
+        file.metadata().unwrap().len()
+    );
+    (0..5000).for_each(|_| {
+        writeln!(file, "{}", log_lines).expect("Couldn't write to temp log file...");
+        file.sync_all().expect("Failed to sync file");
+    });
+    debug!(
+        "file len between agents: {}",
+        file.metadata().unwrap().len()
+    );
 
     debug!("Second agent run");
     // Make sure the agent starts where it left off
@@ -865,7 +920,7 @@ fn lookback_stateful_lines_are_delivered() {
     let (server, received, shutdown_handle, cert_file, addr) = common::self_signed_https_ingester();
     thread::sleep(std::time::Duration::from_millis(250));
     tokio_test::block_on(async {
-        let (line_count, _, server) = tokio::join!(
+        let (line_count2, _, server) = tokio::join!(
             async {
                 tokio::time::delay_for(tokio::time::Duration::from_millis(200)).await;
                 let mut handle = common::spawn_agent(AgentSettings {
@@ -879,12 +934,16 @@ fn lookback_stateful_lines_are_delivered() {
                 });
 
                 let stderr_reader = std::io::BufReader::new(handle.stderr.take().unwrap());
-                std::thread::spawn(move || {
+                let stderr_thread = std::thread::spawn(move || {
                     stderr_reader.lines().for_each(|line| debug!("{:?}", line))
                 });
 
-                tokio::time::delay_for(tokio::time::Duration::from_millis(3000)).await;
-
+                debug!("Give the agent a chance to finish running");
+                task::spawn_blocking(move || handler.join().unwrap())
+                    .await
+                    .unwrap();
+                debug!("Give the agent a chance to finish running");
+                tokio::time::delay_for(tokio::time::Duration::from_millis(2000)).await;
                 handle.kill().unwrap();
 
                 debug!("getting lines from {}", &file_path.to_str().unwrap());
@@ -897,6 +956,11 @@ fn lookback_stateful_lines_are_delivered() {
                 shutdown_handle();
 
                 handle.wait().unwrap();
+
+                task::spawn_blocking(move || stderr_thread.join().unwrap())
+                    .await
+                    .unwrap();
+
                 line_count
             },
             async move {
@@ -906,7 +970,7 @@ fn lookback_stateful_lines_are_delivered() {
                     .create(false)
                     .open(&file_path_clone)
                     .expect("Couldn't create temp log file...");
-                (0..5).for_each(|_| {
+                (0..5000).for_each(|_| {
                     writeln!(file, "{}", log_lines).expect("Couldn't write to temp log file...");
                     file.sync_all().expect("Failed to sync file");
                 });
@@ -916,6 +980,14 @@ fn lookback_stateful_lines_are_delivered() {
             server
         );
         server.unwrap();
-        assert_eq!(line_count, 5);
+        debug!(
+            "final line count: {}, target {}",
+            line_count1 + line_count2,
+            line_write_count + 20_000 + 5_000 + 5_000 + 5_000
+        );
+        assert_eq!(
+            line_count1 + line_count2,
+            line_write_count + 20_000 + 5_000 + 5_000 + 5_000
+        );
     });
 }
