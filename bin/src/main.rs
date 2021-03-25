@@ -80,8 +80,12 @@ fn main() {
                     offset_state = Some(_offset_state);
                     match offsets {
                         Ok(os) => {
+                            for (k, o) in os.iter().map(|fo| (fo.key.bytes(), fo.offset)) {
+                                debug!("{:?}", (std::str::from_utf8(k).unwrap(), o));
+                            }
                             initial_offsets =
-                                Some(os.into_iter().map(|fo| (fo.key, fo.offset)).collect())
+                                Some(os.into_iter().map(|fo| (fo.key, fo.offset)).collect());
+
                         }
                         Err(e) => warn!("couldn't retrieve offsets from agent state, {:?}", e),
                     }

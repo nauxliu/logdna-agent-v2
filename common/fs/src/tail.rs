@@ -106,12 +106,14 @@ impl Tailer {
                             // will initiate a file to it's current length
                             if let Some(entry) = fs.entries.borrow().get(entry_ptr){
                                 let path = fs.resolve_direct_path(&entry, &fs.entries.borrow());
-                                if let Entry::File { data, .. } = entry {
+                                if let Entry::File { name, data, .. } = entry {
                                     match lookback_config {
                                         Lookback::Start => {
                                             let offset = match initial_offsets.as_ref() {
                                                 Some(initial_offsets) => {
-                                                    initial_offsets.get(&path.as_os_str().as_bytes().into()).copied().unwrap_or(0)
+                                                    let offset = initial_offsets.get(&path.as_os_str().as_bytes().into()).copied().unwrap_or(0);
+                                                    debug!("Got offset {} from state for {:?} using key {:?}", offset, name, path);
+                                                    offset
                                                 }
                                                 None => 0
                                             };
@@ -121,10 +123,13 @@ impl Tailer {
                                         Lookback::SmallFiles => {
                                             let offset = match initial_offsets.as_ref() {
                                                 Some(initial_offsets) => {
-                                                    initial_offsets.get(&path.as_os_str().as_bytes().into()).copied().unwrap_or(0)
+                                                    let offset = initial_offsets.get(&path.as_os_str().as_bytes().into()).copied().unwrap_or(0);
+                                                    debug!("Got offset {} from state for {:?} using key {:?}", offset, name, path);
+                                                    offset
                                                 }
                                                 None => {
                                                     let len = path.metadata().map(|m| m.len()).unwrap_or(0);
+                                                    debug!("Smallfiles lookback {} from state for {:?} using key {:?}", len, name, path);
                                                     if len < 8192 {
                                                         0
                                                     } else{
