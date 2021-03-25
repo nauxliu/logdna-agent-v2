@@ -85,7 +85,6 @@ fn main() {
                             }
                             initial_offsets =
                                 Some(os.into_iter().map(|fo| (fo.key, fo.offset)).collect());
-
                         }
                         Err(e) => warn!("couldn't retrieve offsets from agent state, {:?}", e),
                     }

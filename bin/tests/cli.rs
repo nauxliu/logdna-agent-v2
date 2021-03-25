@@ -862,6 +862,82 @@ async fn test_lookback_restarting_agent() {
         agent_handle.kill().expect("Could not kill process");
         shutdown_handle();
     });
+    server_result.unwrap();
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "integration_tests"), ignore)]
+#[cfg_attr(not(target_os = "linux"), ignore)]
+async fn test_symlink_initialization() {
+    let log_dir = tempdir().expect("Couldn't create temp dir...").into_path();
+    let excluded_dir = tempdir().expect("Couldn't create temp dir...").into_path();
+
+    let db_dir = tempdir().expect("Couldn't create temp dir...");
+    let db_dir_path = db_dir.path();
+
+    let (server, received, shutdown_handle, cert_file, addr) = common::self_signed_https_ingester();
+
+    let file_path = excluded_dir.join("test.log");
+    let symlink_path = log_dir.join("test-symlink.log");
+
+    File::create(&file_path).expect("Couldn't create temp log file...");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&file_path)
+        .unwrap();
+
+    for i in 0..10 {
+        writeln!(file, "SAMPLE {}", i).unwrap();
+    }
+    file.sync_all().unwrap();
+
+    std::os::unix::fs::symlink(&file_path, &symlink_path).unwrap();
+
+    let settings = AgentSettings {
+        log_dirs: &log_dir.to_str().unwrap(),
+        exclusion_regex: Some(r"/var\w*"),
+        ssl_cert_file: Some(cert_file.path()),
+        lookback: Some("start"),
+        state_db_dir: Some(&db_dir_path),
+        host: Some(&addr),
+        ..Default::default()
+    };
+    let mut agent_handle = common::spawn_agent(settings.clone());
+    let stderr_reader = agent_handle.stderr.take().unwrap();
+    // Consume output
+    consume_output(stderr_reader);
+
+    tokio::time::delay_for(tokio::time::Duration::from_millis(2000)).await;
+    agent_handle.kill().expect("Could not kill process");
+
+    let mut agent_handle = common::spawn_agent(settings);
+    let stderr_reader = agent_handle.stderr.take().unwrap();
+    // Consume output
+    consume_output(stderr_reader);
+
+    tokio::time::delay_for(tokio::time::Duration::from_millis(1000)).await;
+
+    let (server_result, _) = tokio::join!(server, async {
+        for i in 10..20 {
+            writeln!(file, "SAMPLE {}", i).unwrap();
+        }
+        file.sync_all().unwrap();
+        common::force_client_to_flush(&log_dir).await;
+
+        // Wait for the data to be received by the mock ingester
+        tokio::time::delay_for(tokio::time::Duration::from_millis(2000)).await;
+
+        let map = received.lock().await;
+        let file_info = map
+            .get(symlink_path.to_str().unwrap())
+            .expect("symlink not found");
+        for (i, line) in file_info.values.iter().enumerate() {
+            assert_eq!(line.as_str(), &format!("SAMPLE {}\n", i));
+        }
+        agent_handle.kill().expect("Could not kill process");
+        shutdown_handle();
+    });
 
     server_result.unwrap();
 }
@@ -869,7 +945,9 @@ async fn test_lookback_restarting_agent() {
 fn consume_output(stderr_handle: std::process::ChildStderr) {
     let stderr_reader = std::io::BufReader::new(stderr_handle);
     std::thread::spawn(move || {
-        stderr_reader.lines().count();
+        for line in stderr_reader.lines() {
+            println!("{:?}", line);
+        }
     });
 }
 
