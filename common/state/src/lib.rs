@@ -98,7 +98,6 @@ impl AgentState {
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub struct FileName(bytes::Bytes);
 
-
 impl FileName {
     pub fn bytes(&self) -> &[u8] {
         &self.0
