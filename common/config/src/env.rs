@@ -1,10 +1,120 @@
 use crate::raw::{Config as RawConfig, Rules as RawRules};
 use config_macro::env_config;
 use http::types::params::{Params, Tags};
-use serde::Deserialize;
+
+use serde::{Deserialize, Deserializer};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use combine::parser::combinator::recognize;
+use combine::parser::range::take_while1;
+use combine::parser::repeat::escaped;
+use combine::{any, sep_by, token, Parser, RangeStreamOnce, StreamOnce};
+
+fn regex_rule_parser<I>() -> impl Parser<I, Output = Vec<String>>
+where
+    I: combine::Stream<Token = char> + RangeStreamOnce,
+    <I as StreamOnce>::Range: combine::stream::Range,
+{
+    sep_by(
+        recognize(escaped(take_while1(|c| c != '\\' && c != ','), '\\', any())),
+        token(','),
+    )
+}
+
+fn parse_regexes_from_str(env_var: &str) -> Result<Vec<String>, String> {
+    let (parsed, trailing) = regex_rule_parser()
+        .parse(env_var)
+        .map_err(|_| "Parse Error")?;
+    if trailing != "" {
+        return Err("Trailing Characters".into());
+    }
+    // unescape the escaped commas
+    Ok(parsed
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace("\\,", ","))
+        .collect())
+}
+
+pub fn deserialize_with_parse_regexes<'de, D>(
+    deserializer: D,
+) -> Result<Option<EnvList<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let regexes = parse_regexes_from_str(&s).map_err(serde::de::Error::custom)?;
+    if regexes.len() > 0 {
+        Ok(Some(EnvList(regexes)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[test]
+fn test_regex_rule_parser() {
+    let pattern = "hello, world";
+    assert_eq!(
+        regex_rule_parser().parse(pattern),
+        Ok((vec!["hello".to_string(), " world".to_string()], ""))
+    );
+
+    let pattern = "hello\\, world";
+    assert_eq!(
+        regex_rule_parser().parse(pattern),
+        Ok((vec!["hello\\, world".to_string()], ""))
+    );
+
+    let pattern = "hello\\, world,he\\llo, world";
+    assert_eq!(
+        regex_rule_parser().parse(pattern),
+        Ok((
+            vec![
+                "hello\\, world".to_string(),
+                "he\\llo".to_string(),
+                " world".to_string()
+            ],
+            ""
+        ))
+    );
+
+    let pattern = ",";
+    assert_eq!(
+        regex_rule_parser().parse(pattern),
+        Ok((vec!["".to_string(), "".to_string()], "")),
+        ""
+    );
+
+    let pattern = ",";
+    assert_eq!(parse_regexes_from_str(pattern), Ok(vec![]), "");
+
+    // Errors on trailing Backslash
+    let pattern = "hello\\, world,he\\llo, world\\";
+    assert_eq!(parse_regexes_from_str(pattern), Err("Parse Error".into()));
+
+    // Ignore the trailing comma
+    let pattern = "hello\\, world,he\\llo, world";
+    assert_eq!(
+        parse_regexes_from_str(pattern),
+        Ok(vec![
+            "hello, world".to_string(),
+            "he\\llo".to_string(),
+            " world".to_string()
+        ])
+    );
+
+    let pattern = "hello\\, world,he\\llo, world";
+    assert_eq!(
+        parse_regexes_from_str(pattern),
+        Ok(vec![
+            "hello, world".to_string(),
+            "he\\llo".to_string(),
+            " world".to_string()
+        ])
+    );
+}
 
 #[env_config]
 #[derive(Deserialize, Debug, Clone)]
@@ -64,6 +174,7 @@ pub struct Config {
 
     #[env(LOGDNA_EXCLUSION_REGEX_RULES, LOGDNA_EXCLUDE_REGEX)]
     #[example("/var/log/.*,/var/data/.*")]
+    #[serde(deserialize_with = "deserialize_with_parse_regexes")]
     pub exclusion_regex_rules: Option<EnvList<String>>,
 
     #[env(LOGDNA_INCLUSION_RULES, LOGDNA_INCLUDE)]
@@ -72,17 +183,21 @@ pub struct Config {
 
     #[env(LOGDNA_INCLUSION_REGEX_RULES, LOGDNA_INCLUDE_REGEX)]
     #[example("/var/log/.*,/var/data/.*")]
+    #[serde(deserialize_with = "deserialize_with_parse_regexes")]
     pub inclusion_regex_rules: Option<EnvList<String>>,
 
     #[env(LOGDNA_LINE_EXCLUSION_REGEX)]
     #[example("DEBUG")]
+    #[serde(deserialize_with = "deserialize_with_parse_regexes")]
     pub line_exclusion_regex: Option<EnvList<String>>,
 
     #[env(LOGDNA_LINE_INCLUSION_REGEX)]
+    #[serde(deserialize_with = "deserialize_with_parse_regexes")]
     pub line_inclusion_regex: Option<EnvList<String>>,
 
     #[env(LOGDNA_REDACT_REGEX)]
     #[example(r"\S+@\S+\.\S+")]
+    #[serde(deserialize_with = "deserialize_with_parse_regexes")]
     pub line_redact_regex: Option<EnvList<String>>,
 
     #[env(LOGDNA_JOURNALD_PATHS)]
