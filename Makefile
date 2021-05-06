@@ -72,7 +72,7 @@ AWS_SHARED_CREDENTIALS_FILE=$(HOME)/.aws/credentials
 
 space := $(subst ,, )
 comma := ,
-FEATURES?=
+FEATURES?=profiling
 FEATURES_ARG=$(if $(FEATURES),--features $(subst $(space),$(comma),$(FEATURES)))
 
 _TAC= awk '{line[NR]=$$0} END {for (i=NR; i>=1; i--) print line[i]}'
