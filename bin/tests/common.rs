@@ -109,6 +109,7 @@ pub fn truncate_file(file_path: &Path) -> Result<(), std::io::Error> {
 #[derive(Clone, Default)]
 pub struct AgentSettings<'a> {
     pub log_dirs: &'a str,
+    pub exclusion: Option<&'a str>,
     pub exclusion_regex: Option<&'a str>,
     pub journald_dirs: Option<&'a str>,
     pub ssl_cert_file: Option<&'a std::path::Path>,
@@ -185,6 +186,10 @@ pub fn spawn_agent(settings: AgentSettings) -> Child {
 
     if let Some(state_db_dir) = settings.state_db_dir {
         agent.env("LOGDNA_DB_PATH", state_db_dir);
+    }
+
+    if let Some(rules) = settings.exclusion {
+        agent.env("LOGDNA_EXCLUSION_RULES", rules);
     }
 
     if let Some(rules) = settings.exclusion_regex {
