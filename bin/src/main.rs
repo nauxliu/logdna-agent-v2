@@ -150,7 +150,7 @@ async fn main() {
     }
 
     let fs_source = fs_source
-        .process(&mut fs_tailer_buf)
+        .process()
         .expect("except Failed to create FS Tailer")
         .map(StrictOrLazyLineBuilder::Lazy);
 
